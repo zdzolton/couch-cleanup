@@ -1,0 +1,130 @@
+#!/usr/bin/ruby -rubygems
+require 'uri'
+require 'json'
+
+def log msg
+  STDOUT.puts "#{Time.now.strftime "%Y-%m-%d %H:%M:%S"}: #{msg}"
+  STDOUT.flush
+end
+
+def parse_couch_root_url url
+  # Ensure there's a scheme (i.e. http:// or https://)
+  url = "http://#{url}" unless url =~ /^[a-zA-Z]+:\/\//
+  url = URI.parse url
+  path = url.path.empty? ? '/' : url.path
+  url = "#{url.to_s}#{path}"
+  log "CouchDB root URL: #{url}"
+  url
+rescue
+  abort "usage: #{$0} COUCHDB_ROOT_URL"
+end
+
+def get_dbs couch_root
+  url = URI.join couch_root, '/_all_dbs' 
+  JSON.parse %x(curl -sS '#{url}')
+end
+
+def get_ddocs couch_root, db_name
+  ddocs = "/#{db_name}/_all_docs?startkey=%22_design%2F%22&endkey=%22_design0%22&include_docs=true"
+  ddoc_url = URI.join couch_root, ddocs
+  JSON.parse(%x(curl -sS '#{ddoc_url}'))['rows'].map{ |row| row['doc'] }
+end
+
+def post_couch url
+  %x(curl -X POST -sS -H 'Content-type: application/json' '#{url}')
+end
+
+def do_cleanup couch_root, task
+  start_cleanup couch_root, task
+  wait_on couch_root, task
+end
+
+def start_cleanup couch_root, task
+  path = case task[:type]
+  when :compact_db
+    "/#{task[:db]}/_compact"
+  when :view_cleanup
+    "/#{task[:db]}/_view_cleanup"
+  when :fti_cleanup
+    "/#{task[:db]}/_fti/_cleanup"
+  when :compact_indices
+    "/#{task[:db]}/_compact/#{task[:ddoc]}"
+  when :optimize_fti
+    "/#{task[:db]}/_fti/_design/#{task[:ddoc]}/#{task[:fti]}/_optimize"
+  end
+  log "Launching cleanup task: \n#{task.inspect}"
+  post_couch URI.join(couch_root, path)
+end
+
+def wait_on couch_root, cleanup_task
+  test_proc = make_wait_test couch_root, cleanup_task
+  log "Waiting for cleanup task..."
+  begin 
+    sleep 5
+  end until test_proc.call
+  log "Cleanup task completed."
+end
+
+def make_wait_test couch_root, cleanup_task
+  case cleanup_task[:type]
+  when :compact_db
+    Proc.new do
+      !get_active_tasks(couch_root).any? do |t|
+        t['type'] == 'Database Compaction' && t['task'] == cleanup_task[:db]
+      end
+    end
+  when :view_cleanup
+    # Launching view cleanup will inadvertently start indexing any unbuilt indices...
+    Proc.new do
+      !get_active_tasks(couch_root).any? do |t|
+        t['type'] == 'View Group Indexer' && t['task'] =~ /^#{cleanup_task[:db]} /
+      end
+    end
+  when :fti_cleanup
+    # TODO: Determine better tests
+    Proc.new{ true }
+  when :compact_indices
+    Proc.new do
+      !get_active_tasks(couch_root).any? do |t|
+        db_ddoc = "#{cleanup_task[:db]}/#{cleanup_task[:ddoc]}"
+        t['type'] == 'View Group Compaction' && t['task'] == db_ddoc
+      end
+    end
+  when :optimize_fti
+    # TODO: Determine better tests
+    Proc.new{ true }
+  end
+end
+
+def get_active_tasks couch_root
+  url = URI.join couch_root, '/_active_tasks'
+  JSON.parse %x(curl -sS '#{url}')
+end
+
+root_url = parse_couch_root_url ARGV.first
+log 'Starting cleanup...'
+cleanup_tasks = []
+get_dbs(root_url).each do |db_name|
+  cleanup_tasks << { :type => :compact_db, :db => db_name }
+  cleanup_tasks << { :type => :view_cleanup, :db => db_name }
+  cleanup_tasks << { :type => :fti_cleanup, :db => db_name }
+  get_ddocs(root_url, db_name).each do |ddoc|
+    ddoc_name = ddoc['_id'].gsub /^_design\//, ''
+    cleanup_tasks << { 
+      :type => :compact_indices, 
+      :db => db_name, 
+      :ddoc => ddoc_name 
+    }
+    fulltext = ddoc['fulltext']
+    fulltext.keys.each do |fti_name|
+      cleanup_tasks << { 
+        :type => :optimize_fti, 
+        :db => db_name, 
+        :ddoc => ddoc_name, 
+        :fti => fti_name 
+      }
+    end unless fulltext.nil?
+  end
+end
+cleanup_tasks.each{ |task| do_cleanup root_url, task }
+log 'All cleanup tasks complete!'
