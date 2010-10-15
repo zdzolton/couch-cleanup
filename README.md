@@ -23,6 +23,14 @@ that caused the view to be built.
 
 This script will help you automate reclaiming this "wasted" disk space.
 
+What specifically will this script do?
+---
+This script will compact each database, and remove unused view and CouchDB-Lucene
+index files. The script also compacts the view indices of each design doc, and
+optimizes any CouchDB-Lucene indexes it finds. Moreover, this script tries to wait
+for each cleanup task to complete before beginning the next, so as not to bombard
+the server with activity.
+
 How to use this
 ---
 Since the cleanup activities performed by this script can create a bunch of disk I/O,
