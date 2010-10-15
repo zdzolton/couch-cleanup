@@ -14,7 +14,7 @@ For example:
 
 Why do I need this?
 ---
-CouchDB databases and views use  
+CouchDB databases and views use
 [append-only data structures](http://wiki.apache.org/couchdb/Technical%20Overview#Document_Storage) 
 on disk for reliability and MVCC. You'll likely want to compact your databases and
 view indices, on occasion, to reclaim space from old revisions. In addition,
